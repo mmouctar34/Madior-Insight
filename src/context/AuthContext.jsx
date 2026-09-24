@@ -128,38 +128,26 @@ export function AuthProvider({ children }) {
     return data;
   };
 
-  /* ── Inscription RÉELLE (Supabase Auth + ligne `users`) ── */
+  /* ── Inscription RÉELLE (Supabase Auth) ──
+     La ligne `users` est créée côté base par le trigger `on_auth_user_created`
+     (supabase/schema.sql) à partir de options.data : matricule unique, plan
+     « gratuit ». Un plan payant s'obtient ensuite via /abonnement. */
   const inscriptionReelle = async ({ email, password, profil }) => {
-    const { data, error } = await supabase.auth.signUp({ email, password });
+    const { data, error } = await supabase.auth.signUp({
+      email, password,
+      options: {
+        data: {
+          prenom: profil.prenom,
+          nom: profil.nom,
+          tel: profil.tel || '',
+          niveau: profil.niveau,
+          type: profil.type,
+          lycee: profil.lycee || '',
+        },
+      },
+    });
     if (error) throw new Error(error.message.includes('already registered') ? 'Un compte existe déjà avec cet email.' : error.message);
     if (!data.user) throw new Error("La création du compte a échoué. Réessaie.");
-
-    const { count } = await supabase.from('users').select('*', { count: 'exact', head: true });
-    const matricule = genMatricule((count || 0) + 1);
-    const { IN, IS } = getQuotasForPlan(profil.plan, profil.niveau);
-
-    const { error: errInsert } = await supabase.from('users').insert({
-      id: data.user.id,
-      matricule,
-      prenom: profil.prenom,
-      nom: profil.nom,
-      email,
-      tel: profil.tel || null,
-      niveau: profil.niveau,
-      type: profil.type,
-      lycee: profil.lycee || null,
-      plan: profil.plan,
-      "IN": IN,
-      "IS": IS,
-      filigrane: matricule + Math.random().toString(36).slice(2, 8).toUpperCase(),
-      parrain_code: `MI-${profil.prenom.slice(0,3).toUpperCase()}-${Math.floor(1000+Math.random()*9000)}`,
-      contenu_debloque: [],
-      contenu_choisi_confirme: profil.sautSelection ?? (profil.type === 'universite'),
-      abo_debut: new Date().toISOString(),
-      abo_fin: new Date(Date.now() + 30*86400000).toISOString(),
-    });
-    if (errInsert) throw new Error("Compte créé mais le profil n'a pas pu être enregistré : " + errInsert.message);
-
     return data;
   };
 

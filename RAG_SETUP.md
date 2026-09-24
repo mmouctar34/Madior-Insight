@@ -42,7 +42,8 @@ Tes cours (Google Drive)
 ## Étape 2 — Exécuter le schéma SQL
 
 1. Dans Supabase → *SQL Editor*
-2. Colle et exécute le contenu de `supabase/schema.sql`
+2. Colle et exécute le contenu de `supabase/schema.sql` (il peut être
+   ré-exécuté sans erreur après une mise à jour)
    (active `pgvector` et crée toutes les tables : `documents`, `chunks`,
    `ia_logs` pour le RAG ; `messages_communaute`, `communaute_bloques`,
    `communaute_signalements` pour la communauté ; `transactions`, `users`
@@ -211,10 +212,10 @@ dans le même navigateur).
 >   `localStorage`**, même avec Supabase configuré : elle ne s'applique
 >   donc qu'au navigateur de l'admin. Il faudra une table dédiée pour
 >   qu'elle soit effective pour tous les élèves.
-> - Les policies RLS de `communaute_bloques` / `communaute_signalements`
->   sont ouvertes (lecture/écriture pour tous) pour simplifier la démo. En
->   production, restreindre l'écriture de `communaute_bloques` au rôle
->   service.
+> - Côté base, seuls les comptes `is_admin` peuvent bloquer, lire et
+>   traiter les signalements ou supprimer des messages ; un élève bloqué ne
+>   peut plus poster, et le prénom affiché vient toujours de son profil
+>   (voir la section « Sécurité » de `schema.sql`).
 
 ## Vidéo YouTube (page d'accueil)
 

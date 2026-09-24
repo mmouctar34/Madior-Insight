@@ -115,11 +115,16 @@ export default function Login() {
       try {
         const { session } = await inscriptionReelle({
           email: form.email, password: form.password,
-          profil: { prenom:form.prenom, nom:form.nom, tel:form.tel, niveau:form.niveau, type, plan:form.plan, lycee:form.lycee, sautSelection },
+          profil: { prenom:form.prenom, nom:form.nom, tel:form.tel, niveau:form.niveau, type, lycee:form.lycee },
         });
-        if (session) {
+        /* Le compte démarre toujours en gratuit : un plan payant choisi ici
+           doit être réglé depuis la page Abonnement. */
+        if (session && !estGratuit) {
+          toast(`Bienvenue ${form.prenom} ! Finalise ton abonnement ${form.plan} pour l'activer.`,'success',6000);
+          navigate('/abonnement');
+        } else if (session) {
           toast(`Bienvenue ${form.prenom} !`,'success');
-          navigate(sautSelection ? '/dashboard' : '/choisir-contenu');
+          navigate('/dashboard');
         } else {
           toast('Compte créé ! Vérifie ta boîte mail pour confirmer ton adresse, puis connecte-toi.','success',6000);
           setTab('connexion');
