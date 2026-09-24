@@ -93,20 +93,6 @@ create table if not exists messages_communaute (
 
 create index if not exists messages_communaute_created_idx on messages_communaute (created_at desc);
 
-alter table messages_communaute enable row level security;
-
--- Lecture publique (tous les élèves connectés voient tous les messages)
-create policy "Lecture publique communaute" on messages_communaute for select using (true);
--- Écriture publique (élève connecté peut poster) — la modération se fait a posteriori depuis l'admin
-create policy "Ecriture publique communaute" on messages_communaute for insert with check (true);
-
--- Suppression réservée à la modération (l'admin utilise la clé service, donc
--- cette policy couvre le cas où on voudrait un jour l'ouvrir à un rôle "moderateur")
-create policy "Suppression moderation communaute" on messages_communaute for delete using (true);
-
--- Active le temps réel sur cette table (sinon on reste en polling côté frontend)
-alter publication supabase_realtime add table messages_communaute;
-
 -- ============================================================
 -- Modération de la communauté — utilisateurs bloqués + signalements
 -- ============================================================
@@ -129,31 +115,6 @@ create table if not exists communaute_signalements (
   created_at   timestamptz default now()
 );
 
-alter table communaute_bloques enable row level security;
-alter table communaute_signalements enable row level security;
-
--- Démo simplifiée : lecture/écriture ouvertes (comme messages_communaute).
--- En production, restreindre l'écriture sur communaute_bloques au rôle service.
-create policy "Lecture bloques"     on communaute_bloques      for select using (true);
-create policy "Ecriture bloques"    on communaute_bloques      for all    using (true);
-create policy "Lecture signalements"  on communaute_signalements for select using (true);
-create policy "Ecriture signalements" on communaute_signalements for all    using (true);
-alter table documents enable row level security;
-alter table chunks enable row level security;
-alter table ia_logs enable row level security;
-
--- Lecture publique des documents/chunks (le filtrage se fait côté Edge Function)
-create policy "Lecture publique documents" on documents for select using (true);
-create policy "Lecture publique chunks"    on chunks    for select using (true);
-
--- Écriture réservée au rôle service (Edge Functions), pas aux clients anonymes
-create policy "Ecriture service uniquement documents" on documents for all
-  using (auth.role() = 'service_role');
-create policy "Ecriture service uniquement chunks" on chunks for all
-  using (auth.role() = 'service_role');
-create policy "Ecriture logs" on ia_logs for insert with check (true);
-create policy "Lecture logs service" on ia_logs for select using (auth.role() = 'service_role');
-
 -- ============================================================
 -- Paiement Wave — transactions
 -- ============================================================
@@ -171,18 +132,12 @@ create table if not exists transactions (
   confirme_at        timestamptz
 );
 
-alter table transactions enable row level security;
-
--- Démo simplifiée : lecture/écriture ouvertes, comme le reste des tables démo.
--- En production, restreindre l'écriture au rôle service (Edge Functions uniquement).
-create policy "Lecture transactions" on transactions for select using (true);
-create policy "Ecriture transactions" on transactions for all using (true);
-
 -- Fonction utilitaire pour créditer un solde (IN_boutique, IS) depuis le webhook Wave
 create or replace function incrementer_solde(p_user_id uuid, p_champ text, p_valeur integer)
 returns void
 language plpgsql
 security definer
+set search_path = public
 as $$
 begin
   if p_champ = 'IN_boutique' then
@@ -197,8 +152,8 @@ $$;
 -- Comptes élèves — Authentification réelle (Supabase Auth)
 -- ============================================================
 -- L'id correspond exactement à auth.users.id (Supabase Auth).
--- Une ligne est créée ici juste après un supabase.auth.signUp() réussi
--- (voir AuthContext.jsx → inscriptionReelle).
+-- La ligne est créée automatiquement par le trigger `on_auth_user_created`
+-- (section Sécurité en fin de fichier) dès qu'un compte Supabase Auth est créé.
 create table if not exists users (
   id                     uuid primary key references auth.users(id) on delete cascade,
   matricule              text unique,
@@ -209,7 +164,7 @@ create table if not exists users (
   niveau                 text not null,             -- 'seconde'|'premiere'|'terminale'|'universite-l1'...
   type                   text not null default 'lycee', -- 'lycee' | 'universite'
   lycee                  text,
-  plan                   text not null default 'standard',
+  plan                   text not null default 'gratuit',
   "IN"                   integer default 0,
   "IN_boutique"          integer default 0,
   "IS"                   integer default 0,
@@ -225,13 +180,6 @@ create table if not exists users (
   is_admin               boolean default false,
   created_at             timestamptz default now()
 );
-
-alter table users enable row level security;
-
--- Chacun peut lire/modifier sa propre fiche.
-create policy "Lecture propre profil"      on users for select using (auth.uid() = id);
-create policy "Mise a jour propre profil"  on users for update using (auth.uid() = id);
-create policy "Creation propre profil"     on users for insert with check (auth.uid() = id);
 
 -- Le classement doit pouvoir afficher prénom/points/rang de tout le monde :
 -- on autorise la lecture publique d'un sous-ensemble de colonnes via une vue dédiée
@@ -257,9 +205,271 @@ create table if not exists actualites (
 
 create index if not exists idx_actualites_publie_le on actualites (publie_le desc);
 
+-- ============================================================
+-- SÉCURITÉ — RLS, droits et triggers
+-- ============================================================
+-- Principe : les Edge Functions utilisent la clé service_role, qui ignore
+-- la RLS. Les policies ci-dessous ne concernent donc que le navigateur
+-- (rôles `anon` et `authenticated`). Tout ce qui touche à l'argent
+-- (plan, abonnement, IS, IN_boutique, transactions) ne peut être écrit que
+-- côté serveur.
+--
+-- Cette section peut être ré-exécutée sans erreur (drop … if exists).
+
+-- ── Fonction utilitaire : l'utilisateur connecté est-il admin ? ──
+create or replace function is_admin()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select coalesce((select is_admin from users where id = auth.uid()), false);
+$$;
+
+-- Vrai quand la requête vient du navigateur (clé anon + éventuel JWT
+-- utilisateur), faux pour les Edge Functions (service_role) et le SQL Editor.
+create or replace function requete_client()
+returns boolean
+language sql
+stable
+as $$
+  select coalesce(auth.role(), '') in ('anon', 'authenticated');
+$$;
+
+-- ── Fonctions réservées au serveur ──
+-- Par défaut, Postgres donne EXECUTE à tout le monde (donc à anon via /rpc).
+revoke execute on function incrementer_solde(uuid, text, integer) from public, anon, authenticated;
+grant  execute on function incrementer_solde(uuid, text, integer) to service_role;
+
+revoke execute on function match_chunks(vector, int, text) from public, anon, authenticated;
+grant  execute on function match_chunks(vector, int, text) to service_role;
+
+-- ============================================================
+-- users
+-- ============================================================
+alter table users enable row level security;
+
+drop policy if exists "Lecture propre profil"     on users;
+drop policy if exists "Mise a jour propre profil" on users;
+drop policy if exists "Creation propre profil"    on users;
+
+create policy "Lecture propre profil"     on users for select to authenticated using (auth.uid() = id);
+create policy "Mise a jour propre profil" on users for update to authenticated
+  using (auth.uid() = id) with check (auth.uid() = id);
+-- Pas de policy INSERT : la ligne est créée par le trigger on_auth_user_created.
+
+-- Colonnes qu'un élève ne peut jamais modifier lui-même. Elles sont
+-- remises à leur ancienne valeur (plutôt que de rejeter toute la mise à
+-- jour) pour ne pas casser les autres champs envoyés dans le même patch.
+-- IS et IN_boutique (payés en argent réel) peuvent seulement baisser
+-- (dépense en boutique) ; les crédits passent par le webhook Wave.
+create or replace function proteger_colonnes_users()
+returns trigger
+language plpgsql
+as $$
+begin
+  if requete_client() then
+    new.id            := old.id;
+    new.matricule     := old.matricule;
+    new.email         := old.email;
+    new.plan          := old.plan;
+    new.abo_debut     := old.abo_debut;
+    new.abo_fin       := old.abo_fin;
+    new.is_admin      := old.is_admin;
+    new.filigrane     := old.filigrane;
+    new.parrain_code  := old.parrain_code;
+    new.parrain_id    := old.parrain_id;
+    new.created_at    := old.created_at;
+    new."IS"          := least(coalesce(new."IS", 0), coalesce(old."IS", 0));
+    new."IN_boutique" := least(coalesce(new."IN_boutique", 0), coalesce(old."IN_boutique", 0));
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists proteger_colonnes_users on users;
+create trigger proteger_colonnes_users
+  before update on users
+  for each row execute function proteger_colonnes_users();
+
+-- Création automatique du profil à l'inscription (supabase.auth.signUp).
+-- Les infos saisies arrivent dans options.data (raw_user_meta_data).
+-- Le plan est toujours « gratuit » : un plan payant s'obtient uniquement
+-- après paiement. Le matricule vient d'une séquence (unique, sans
+-- dépendre de ce que l'élève peut lire).
+create sequence if not exists users_matricule_seq;
+
+create or replace function creer_profil_utilisateur()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  meta   jsonb := coalesce(new.raw_user_meta_data, '{}'::jsonb);
+  num    text  := lpad(nextval('users_matricule_seq')::text, 4, '0');
+  v_prenom text := coalesce(nullif(trim(meta->>'prenom'), ''), 'Élève');
+  mat    text  := 'MI-' || extract(year from now())::int || '-' || num;
+begin
+  insert into users (
+    id, matricule, prenom, nom, email, tel, niveau, type, lycee,
+    plan, "IN", "IS", filigrane, parrain_code,
+    contenu_debloque, contenu_choisi_confirme
+  ) values (
+    new.id,
+    mat,
+    v_prenom,
+    coalesce(meta->>'nom', ''),
+    new.email,
+    nullif(meta->>'tel', ''),
+    coalesce(nullif(meta->>'niveau', ''), 'seconde'),
+    case when meta->>'type' = 'universite' then 'universite' else 'lycee' end,
+    nullif(meta->>'lycee', ''),
+    'gratuit', 0, 0,
+    mat || upper(substr(md5(random()::text), 1, 6)),
+    'MI-' || upper(left(v_prenom, 3)) || '-' || num,
+    '[]'::jsonb,
+    true  -- compte gratuit : pas de sélection de contenu à faire
+  )
+  on conflict (id) do nothing;
+  return new;
+end;
+$$;
+
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute function creer_profil_utilisateur();
+
+-- ============================================================
+-- Communauté
+-- ============================================================
+alter table messages_communaute     enable row level security;
+alter table communaute_bloques      enable row level security;
+alter table communaute_signalements enable row level security;
+
+drop policy if exists "Lecture publique communaute"       on messages_communaute;
+drop policy if exists "Ecriture publique communaute"      on messages_communaute;
+drop policy if exists "Suppression moderation communaute" on messages_communaute;
+drop policy if exists "Lecture communaute"                on messages_communaute;
+drop policy if exists "Ecriture communaute"               on messages_communaute;
+drop policy if exists "Suppression communaute admin"      on messages_communaute;
+
+-- Lecture : élèves connectés uniquement
+create policy "Lecture communaute" on messages_communaute for select to authenticated using (true);
+-- Écriture : uniquement sous son propre identifiant, et pas si bloqué
+create policy "Ecriture communaute" on messages_communaute for insert to authenticated
+  with check (
+    user_id = auth.uid()::text
+    and not exists (select 1 from communaute_bloques b where b.user_id = auth.uid()::text)
+  );
+-- Suppression : admins
+create policy "Suppression communaute admin" on messages_communaute for delete to authenticated
+  using (is_admin());
+
+-- Le prénom et le niveau affichés sont pris dans le profil, pas dans la
+-- requête (empêche de poster sous le nom d'un autre).
+create or replace function remplir_auteur_message()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if requete_client() then
+    select u.prenom, u.niveau into new.prenom, new.niveau
+      from users u where u.id::text = new.user_id;
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists remplir_auteur_message on messages_communaute;
+create trigger remplir_auteur_message
+  before insert on messages_communaute
+  for each row execute function remplir_auteur_message();
+
+-- Temps réel (ajout idempotent à la publication)
+do $$
+begin
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'messages_communaute'
+  ) then
+    alter publication supabase_realtime add table messages_communaute;
+  end if;
+end $$;
+
+drop policy if exists "Lecture bloques"        on communaute_bloques;
+drop policy if exists "Ecriture bloques"       on communaute_bloques;
+drop policy if exists "Ecriture bloques admin" on communaute_bloques;
+
+-- Un élève voit seulement s'il est lui-même bloqué ; l'admin voit tout.
+create policy "Lecture bloques" on communaute_bloques for select to authenticated
+  using (user_id = auth.uid()::text or is_admin());
+create policy "Ecriture bloques admin" on communaute_bloques for all to authenticated
+  using (is_admin()) with check (is_admin());
+
+drop policy if exists "Lecture signalements"       on communaute_signalements;
+drop policy if exists "Ecriture signalements"      on communaute_signalements;
+drop policy if exists "Creation signalement"       on communaute_signalements;
+drop policy if exists "Gestion signalements admin" on communaute_signalements;
+
+-- Tout élève connecté peut signaler ; seuls les admins lisent et traitent.
+create policy "Creation signalement" on communaute_signalements for insert to authenticated
+  with check (statut = 'attente');
+create policy "Gestion signalements admin" on communaute_signalements for all to authenticated
+  using (is_admin()) with check (is_admin());
+
+-- ============================================================
+-- RAG : documents, chunks, ia_logs
+-- ============================================================
+-- Le contenu des cours n'est lu que par l'Edge Function ask-ia
+-- (service_role) : aucune policy client = aucun accès depuis le navigateur.
+alter table documents enable row level security;
+alter table chunks    enable row level security;
+alter table ia_logs   enable row level security;
+
+drop policy if exists "Lecture publique documents"            on documents;
+drop policy if exists "Lecture publique chunks"               on chunks;
+drop policy if exists "Ecriture service uniquement documents" on documents;
+drop policy if exists "Ecriture service uniquement chunks"    on chunks;
+drop policy if exists "Ecriture logs"                         on ia_logs;
+drop policy if exists "Lecture logs service"                  on ia_logs;
+
+-- ============================================================
+-- Transactions (paiement Wave)
+-- ============================================================
+-- Écriture : uniquement wave-checkout / wave-webhook (service_role).
+-- Lecture : chacun ses propres transactions (page de retour après paiement).
+alter table transactions enable row level security;
+
+drop policy if exists "Lecture transactions"         on transactions;
+drop policy if exists "Ecriture transactions"        on transactions;
+drop policy if exists "Lecture propres transactions" on transactions;
+
+create policy "Lecture propres transactions" on transactions for select to authenticated
+  using (user_id = auth.uid()::text);
+
+-- ============================================================
+-- Actualités
+-- ============================================================
+-- Écriture : uniquement fetch-actualites (service_role).
 alter table actualites enable row level security;
+
+drop policy if exists "Lecture actualites"  on actualites;
+drop policy if exists "Ecriture actualites" on actualites;
+
 create policy "Lecture actualites" on actualites for select using (true);
-create policy "Ecriture actualites" on actualites for all using (true);
+
+-- Seuls les liens http(s) sont acceptés (pas de javascript:, data:…)
+do $$
+begin
+  if not exists (select 1 from pg_constraint where conname = 'actualites_lien_http') then
+    alter table actualites add constraint actualites_lien_http check (lien ~* '^https?://') not valid;
+  end if;
+end $$;
 
 -- Rafraîchissement automatique toutes les heures via pg_cron (si l'extension
 -- est activée sur ton projet Supabase — Database → Extensions → pg_cron).

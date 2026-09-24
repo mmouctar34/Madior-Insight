@@ -55,13 +55,16 @@ Editor de Supabase si ce n'est pas déjà fait.
 
 C'est fait : dès que `VITE_SUPABASE_URL` et `VITE_SUPABASE_ANON_KEY` sont
 renseignées (voir `RAG_SETUP.md`), `AuthContext.jsx` bascule automatiquement
-sur Supabase Auth (`supabase.auth.signUp` / `signInWithPassword`), crée une
-vraie ligne dans la table `users`, et le bouton **"Continuer en mode démo"**
+sur Supabase Auth (`supabase.auth.signUp` / `signInWithPassword`). La ligne
+`users` est créée par la base elle-même (trigger `on_auth_user_created`)
+avec le plan **gratuit** : un plan payant choisi à l'inscription doit être
+réglé depuis `/abonnement`. Le bouton **"Continuer en mode démo"**
 disparaît tout seul de la page de connexion. Rien à modifier côté frontend :
 il suffit de configurer les variables d'environnement.
 
-Le webhook Wave peut donc créditer un vrai compte dès que le backend est
-configuré — aucune étape supplémentaire n'est nécessaire côté paiement.
+Le plan, l'abonnement, les IS et les IN boutique ne peuvent être modifiés
+que côté serveur (webhook Wave avec la clé service_role) : la base refuse
+qu'un élève les change depuis son navigateur.
 
 ## Comment ça marche une fois configuré
 
