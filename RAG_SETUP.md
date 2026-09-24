@@ -43,7 +43,10 @@ Tes cours (Google Drive)
 
 1. Dans Supabase → *SQL Editor*
 2. Colle et exécute le contenu de `supabase/schema.sql`
-   (crée les tables `documents`, `chunks`, `ia_logs`, active `pgvector`, etc.)
+   (active `pgvector` et crée toutes les tables : `documents`, `chunks`,
+   `ia_logs` pour le RAG ; `messages_communaute`, `communaute_bloques`,
+   `communaute_signalements` pour la communauté ; `transactions`, `users`
+   pour le paiement/auth ; `actualites` pour les actualités)
 
 ## Étape 3 — Créer le compte de service Google Drive
 
@@ -180,9 +183,38 @@ utilise la même table `messages_communaute` créée dans `schema.sql` — aucun
 - Une fois configuré, les messages sont **partagés** entre tous les élèves
   connectés (rafraîchis toutes les 4 secondes).
 - Texte uniquement, 500 caractères max par message, pas de vocal.
-- La modération se fait pour l'instant manuellement depuis le Dashboard
-  Supabase (table `messages_communaute`) — un outil de modération dans
-  l'admin pourra être ajouté plus tard si besoin.
+
+### Modération (onglet **Modération** de `/admin`)
+
+Un outil de modération est désormais intégré à l'espace admin
+(`src/pages/admin/Admin.jsx`, logique dans `src/lib/moderationStore.js`) :
+
+- **Signalements** : chaque élève peut signaler un message depuis
+  `/communaute`. Les signalements arrivent dans l'onglet Modération (badge
+  avec le nombre en attente) où l'admin peut les marquer *traité* /
+  *ignoré*, ou bloquer son auteur. (La suppression d'un message existe dans
+  `moderationStore.js` — `supprimerMessage` — mais n'a pas encore de bouton
+  dans l'admin : pour l'instant, supprimer depuis le Dashboard Supabase.)
+- **Blocage d'un élève** : depuis un signalement ou depuis la fiche élève.
+  Un élève bloqué voit un bandeau et ne peut plus poster.
+- **Fermeture du chat** : l'admin peut fermer la communauté pour tout le
+  monde, pour une durée donnée (réouverture automatique) ou jusqu'à
+  réouverture manuelle.
+
+Tables utilisées (créées par `schema.sql`) : `communaute_bloques` et
+`communaute_signalements`. Sans Supabase, tout est stocké en
+`localStorage` (mode démo : l'admin et l'élève partagent l'état seulement
+dans le même navigateur).
+
+> ⚠️ **Limites actuelles**
+> - La fermeture globale du chat est stockée **uniquement en
+>   `localStorage`**, même avec Supabase configuré : elle ne s'applique
+>   donc qu'au navigateur de l'admin. Il faudra une table dédiée pour
+>   qu'elle soit effective pour tous les élèves.
+> - Les policies RLS de `communaute_bloques` / `communaute_signalements`
+>   sont ouvertes (lecture/écriture pour tous) pour simplifier la démo. En
+>   production, restreindre l'écriture de `communaute_bloques` au rôle
+>   service.
 
 ## Vidéo YouTube (page d'accueil)
 
